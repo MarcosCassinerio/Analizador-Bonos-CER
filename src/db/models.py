@@ -46,6 +46,8 @@ class Cashflow(Base):
     monto_base = Column(Numeric, nullable=False)
     capital_pct = Column(Numeric, nullable=True)
     residual_pct = Column(Numeric, nullable=True)
+    interest_nominal = Column(Numeric, nullable=True)  # cupón nominal sin ajuste CER (interest_amount de Docta)
+    cer_al_fetch = Column(Numeric, nullable=True)      # CER vigente al momento de guardar desde Docta
 
     bono = relationship("Bono", back_populates="cashflows")
 

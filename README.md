@@ -157,6 +157,8 @@ Tablas en PostgreSQL:
 - `coeficientes_cer`: valor del CER por fecha, cargado diariamente desde BCRA
 - `metricas_diarias`: TIR, duration modificada, paridad, valor técnico, intereses corridos, valor residual — **calculadas en el mismo momento que se guarda `precios_raw`**, ya que en ese punto se tienen todos los datos necesarios
 
+Las funciones de acceso a las APIs externas están encapsuladas en `src/apis.py` (importado por `etl.py`). El ETL también expone `backfill_metricas()`, que recalcula métricas para precios históricos que no las tienen aún.
+
 ### src/pricing.py
 - Cálculo de YTM a partir de precio y flujos de caja con `scipy.optimize`
 - Cálculo de duration modificada
@@ -275,8 +277,7 @@ No se usa directorio `data/` — todos los datos crudos y procesados viven en Po
 ```
 analisador-bonos-cer/
 ├── alembic/                    # migraciones de base de datos
-│   ├── versions/
-│   │   └── 0001_initial_schema.py
+│   ├── versions/               # migraciones versionadas
 │   └── env.py
 ├── notebooks/
 │   ├── 01_eda.ipynb
@@ -287,7 +288,8 @@ analisador-bonos-cer/
 │   ├── 06_autoencoder_anomalias.ipynb
 │   └── 07_señales.ipynb
 ├── scripts/
-│   └── explorar_apis.py        # exploración de APIs: Rava, Docta, BCRA
+│   ├── explorar_apis.py        # exploración de APIs: Rava, Docta, BCRA
+│   └── setup_and_run.py        # setup inicial y ejecución del ETL
 ├── src/
 │   ├── db/
 │   │   ├── models.py           # modelos SQLAlchemy
@@ -298,6 +300,7 @@ analisador-bonos-cer/
 │   │   ├── precio.py
 │   │   └── metrica.py
 │   ├── enums.py                # enums Python (TipoAmortizacion, TipoCashflow)
+│   ├── apis.py                 # acceso a las APIs externas (Rava, Docta, BCRA)
 │   ├── etl.py                  # carga diaria de datos
 │   ├── pricing.py              # cálculo de TIR, duration, paridad, VT
 │   ├── nelson_siegel.py        # ajuste de curva
@@ -372,7 +375,7 @@ TIR, duration modificada, paridad, valor técnico, intereses corridos y valor re
 - [x] Definir fuentes de datos (Rava, Docta, BCRA) y validar APIs con script de exploración
 - [x] Diseñar schema de base de datos y generar migración inicial con Alembic
 - [x] Crear schemas Pydantic y modelos SQLAlchemy
-- [ ] Correr migración y construir ETL de carga diaria (`src/etl.py`)
+- [x] Correr migración y construir ETL de carga diaria (`src/etl.py`)
 - [ ] Notebook 01: EDA
 - [ ] Notebook 02: Clustering
 - [ ] Notebook 03: Intragrupo

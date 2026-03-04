@@ -19,6 +19,7 @@ def calcular_metricas(
     cashflows: list[dict],
     cer_hoy: Decimal,
     fecha_hoy: date,
+    cotiza_por_residual: bool = False,
 ) -> dict:
     """
     Calcula las métricas para un bono CER dado el precio de cierre,
@@ -34,6 +35,8 @@ def calcular_metricas(
             - residual_value (float): valor residual % del nominal
         cer_hoy: valor del CER para fecha_hoy
         fecha_hoy: fecha de valuación
+        cotiza_por_residual: True si Rava cotiza el bono en ARS por VN 100 RESIDUAL
+            (ej. DICP, DIP0). False (default) si cotiza por VN 100 ORIGINAL.
 
     Returns:
         dict con tir, duration_modificada, paridad, valor_tecnico,
@@ -41,6 +44,29 @@ def calcular_metricas(
     """
     # Ordenar por fecha de pago
     cfs = sorted(cashflows, key=lambda x: x["fecha_pago"])
+
+    # -------------------------------------------------------------------------
+    # Escala CER: ajustar monto_base al CER de la fecha de valuación.
+    # adj(d) = monto_base_stored * CER(d) / CER_al_fetch
+    # Si cer_al_fetch es None (cashflows sin la nueva columna), factor = 1.0.
+    # -------------------------------------------------------------------------
+    cer_hoy_f = float(cer_hoy)
+    cfs = [
+        {
+            **cf,
+            "adj_capital": float(cf.get("adj_capital", 0)) * (
+                cer_hoy_f / float(cf["cer_al_fetch"])
+                if cf.get("cer_al_fetch") and float(cf.get("cer_al_fetch", 0)) > 0
+                else 1.0
+            ),
+            "adj_interest_amount": float(cf.get("adj_interest_amount", 0)) * (
+                cer_hoy_f / float(cf["cer_al_fetch"])
+                if cf.get("cer_al_fetch") and float(cf.get("cer_al_fetch", 0)) > 0
+                else 1.0
+            ),
+        }
+        for cf in cfs
+    ]
 
     # Filtrar solo cashflows futuros (fecha_pago > fecha_hoy)
     futuros = [cf for cf in cfs if cf["fecha_pago"] > fecha_hoy]
@@ -58,6 +84,18 @@ def calcular_metricas(
     capital_pct_prox = float(proximo.get("capital_pct", 0))
     residual_after = float(proximo.get("residual_value", 0))
     valor_residual = residual_after + capital_pct_prox
+
+    # -------------------------------------------------------------------------
+    # Normalización de precio (solo cuando cotiza_por_residual=True):
+    # Algunos bonos (ej. DICP, DIP0) se cotizan en ARS por VN 100 RESIDUAL,
+    # pero los cashflows de Docta están en ARS por VN 100 ORIGINAL.
+    # precio_normalizado convierte ambas magnitudes a la misma base.
+    # Para todos los demás bonos, cotiza_por_residual=False → sin ajuste.
+    # -------------------------------------------------------------------------
+    if cotiza_por_residual and valor_residual:
+        precio_normalizado = cierre_f * (valor_residual / 100.0)
+    else:
+        precio_normalizado = cierre_f
 
     # -------------------------------------------------------------------------
     # Valor técnico (VT)
@@ -109,7 +147,7 @@ def calcular_metricas(
         flujos.append(cf_total)
 
     def npv(r):
-        return sum(cf / (1 + r) ** t for cf, t in zip(flujos, tiempos)) - cierre_f
+        return sum(cf / (1 + r) ** t for cf, t in zip(flujos, tiempos)) - precio_normalizado
 
     try:
         tir = brentq(npv, -0.9999, 50.0, maxiter=1000)
@@ -125,7 +163,7 @@ def calcular_metricas(
     if not (tir != tir):  # not NaN
         duration = sum(
             t * cf / (1 + tir) ** t for cf, t in zip(flujos, tiempos)
-        ) / cierre_f
+        ) / precio_normalizado
         duration_modificada = duration / (1 + tir)
     else:
         duration_modificada = float("nan")
@@ -134,7 +172,7 @@ def calcular_metricas(
     # Paridad
     # -------------------------------------------------------------------------
     if valor_tecnico and valor_tecnico != 0:
-        paridad = cierre_f / valor_tecnico * 100
+        paridad = precio_normalizado / valor_tecnico * 100
     else:
         paridad = float("nan")
 

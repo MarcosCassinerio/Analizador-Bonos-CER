@@ -9,6 +9,10 @@ class CashflowCreate(BaseModel):
     fecha_pago: date
     tipo: TipoCashflow
     monto_base: Decimal
+    capital_pct: Decimal | None = None
+    residual_pct: Decimal | None = None
+    interest_nominal: Decimal | None = None
+    cer_al_fetch: Decimal | None = None
 
 
 class Cashflow(CashflowCreate):

@@ -10,19 +10,21 @@ Pasos:
 """
 
 import logging
+import math
+import time
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Iterator
 
 import requests
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, outerjoin, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from src.apis import fetch_cashflows_docta, fetch_cer, fetch_ohlcv, get_docta_token
 from src.db.models import Bono, Cashflow, CoeficienteCer, Grupo, MetricaDiaria, PrecioRaw
 from src.db.session import SessionLocal
-from src.enums import FuenteDatos, TipoAmortizacion
+from src.enums import FuenteDatos, TipoAmortizacion, TipoCashflow
 from src.pricing import calcular_metricas
 
 logging.basicConfig(
@@ -71,6 +73,22 @@ BONOS: dict[str, tuple[str, str, TipoAmortizacion]] = {
 
 # Fecha de vencimiento placeholder (se actualiza con los cashflows de Docta)
 FECHA_PLACEHOLDER = date(2099, 12, 31)
+
+# Bonos que Rava cotiza en ARS por VN 100 RESIDUAL (no original).
+# El precio debe normalizarse multiplicando por (valor_residual / 100) antes
+# de calcular TIR, duration y paridad, para que esté en la misma base que
+# los cashflows de Docta (siempre per VN 100 original con nominal_units=100).
+COTIZA_POR_RESIDUAL: set[str] = {"DICP", "DIP0"}
+
+# Bonos cuya API de Docta devuelve cashflows con una base CER diferente a la del prospecto.
+# El factor corrector = CER_base_docta / CER_base_prospecto.
+# CUAP: Docta usa CER_base ≈ 1.4832 (fecha de emisión 2005), pero el prospecto
+# especifica CER_base ≈ 1.0487 (referencia ~2002), lo que equivale a multiplicar
+# todos los cashflows por ≈ 1.4143.
+# Factor derivado de comparar cupón próximo (Jun 2026) en Bonistas vs Docta a mismo CER.
+ESCALA_CASHFLOWS: dict[str, float] = {
+    "CUAP": 1.4143,
+}
 
 # Cache de feriados por año: {año: set[date]}
 _feriados_cache: dict[int, set[date]] = {}
@@ -164,43 +182,60 @@ def _tiene_cashflows(session: Session, ticker: str) -> bool:
     return (count or 0) > 0
 
 
+def _cashflows_necesitan_fetch(session: Session, ticker: str) -> bool:
+    """True si el ticker no tiene cashflows O si alguno tiene cer_al_fetch NULL."""
+    total = session.execute(
+        select(func.count()).select_from(Cashflow).where(Cashflow.ticker == ticker)
+    ).scalar() or 0
+    if total == 0:
+        return True
+    sin_cer = session.execute(
+        select(func.count()).select_from(Cashflow)
+        .where(Cashflow.ticker == ticker)
+        .where(Cashflow.cer_al_fetch == None)
+    ).scalar() or 0
+    return sin_cer > 0
+
+
+def _borrar_cashflows_y_metricas(session: Session, ticker: str) -> None:
+    """Elimina cashflows y métricas del ticker para forzar re-fetch y recálculo."""
+    # Metricas vinculadas a precios del ticker
+    precio_ids = session.execute(
+        select(PrecioRaw.id).where(PrecioRaw.ticker == ticker)
+    ).scalars().all()
+    if precio_ids:
+        session.execute(
+            delete(MetricaDiaria).where(MetricaDiaria.precio_id.in_(precio_ids))
+        )
+
+    # Cashflows del ticker
+    session.execute(
+        delete(Cashflow).where(Cashflow.ticker == ticker)
+    )
+    session.flush()
+    log.info(f"  {ticker}: cashflows y métricas eliminados para re-fetch.")
+
+
 def _get_cer_para_fecha(session: Session, fecha: date) -> Decimal | None:
     row = session.get(CoeficienteCer, fecha)
     return Decimal(str(row.valor)) if row else None
-
-
-def _get_cashflows_para_bono(session: Session, ticker: str) -> list[dict]:
-    rows = session.execute(
-        select(Cashflow).where(Cashflow.ticker == ticker).order_by(Cashflow.fecha_pago)
-    ).scalars().all()
-    return [
-        {
-            "fecha_pago": r.fecha_pago,
-            "adj_capital": float(r.monto_base) if r.tipo.value == "amortizacion" else 0.0,
-            "adj_interest_amount": float(r.monto_base) if r.tipo.value == "cupon" else 0.0,
-            "capital": float(r.monto_base) if r.tipo.value == "amortizacion" else 0.0,
-            "residual_value": 0.0,  # se actualiza más abajo
-        }
-        for r in rows
-    ]
 
 
 # ---------------------------------------------------------------------------
 # Carga de cashflows de Docta → DB
 # ---------------------------------------------------------------------------
 
-def _guardar_cashflows_docta(session: Session, ticker: str, df) -> date | None:
+def _guardar_cashflows_docta(
+    session: Session, ticker: str, df, cer_hoy: Decimal
+) -> date | None:
     """
     Parsea el DataFrame de Docta y guarda los cashflows en DB.
+    Almacena interest_nominal (cupón sin CER) y cer_al_fetch (CER del día de fetch)
+    para permitir escalar monto_base a cualquier fecha de valuación futura.
     Retorna la fecha de vencimiento (max payment_date), o None si df está vacío.
     """
     if df.empty:
         return None
-
-    from src.enums import TipoCashflow
-
-    # Detectar columnas disponibles
-    cols = set(df.columns)
 
     max_fecha = None
     for _, row in df.iterrows():
@@ -208,11 +243,9 @@ def _guardar_cashflows_docta(session: Session, ticker: str, df) -> date | None:
         if max_fecha is None or fecha_pago > max_fecha:
             max_fecha = fecha_pago
 
-        # Capital ajustado
         adj_cap = float(row.get("adj_capital", row.get("capital", 0)) or 0)
-        # Interés ajustado
         adj_int = float(row.get("adj_interest_amount", row.get("interest_amount", 0)) or 0)
-
+        interest_nominal = float(row.get("interest_amount", 0) or 0)
         capital_pct = float(row.get("capital", 0) or 0)
         residual_pct = float(row.get("residual_value", 0) or 0)
 
@@ -224,6 +257,8 @@ def _guardar_cashflows_docta(session: Session, ticker: str, df) -> date | None:
                 monto_base=Decimal(str(adj_cap)),
                 capital_pct=Decimal(str(capital_pct)),
                 residual_pct=Decimal(str(residual_pct)),
+                interest_nominal=None,
+                cer_al_fetch=cer_hoy,
             ))
         if adj_int and adj_int != 0:
             session.add(Cashflow(
@@ -233,6 +268,8 @@ def _guardar_cashflows_docta(session: Session, ticker: str, df) -> date | None:
                 monto_base=Decimal(str(adj_int)),
                 capital_pct=Decimal(str(capital_pct)),
                 residual_pct=Decimal(str(residual_pct)),
+                interest_nominal=Decimal(str(interest_nominal)) if interest_nominal else None,
+                cer_al_fetch=cer_hoy,
             ))
 
     session.flush()
@@ -248,6 +285,9 @@ def _cashflows_para_metricas(session: Session, ticker: str) -> list[dict]:
         select(Cashflow).where(Cashflow.ticker == ticker).order_by(Cashflow.fecha_pago)
     ).scalars().all()
 
+    # Factor corrector para bonos cuyo API de Docta usa base CER incorrecta (ver ESCALA_CASHFLOWS)
+    escala = ESCALA_CASHFLOWS.get(ticker, 1.0)
+
     # Agrupar por fecha_pago
     por_fecha: dict[date, dict] = {}
     for r in rows:
@@ -259,19 +299,23 @@ def _cashflows_para_metricas(session: Session, ticker: str) -> list[dict]:
                 "adj_interest_amount": 0.0,
                 "capital": 0.0,
                 "residual_value": 0.0,
+                "cer_al_fetch": float(r.cer_al_fetch) if r.cer_al_fetch else None,
             }
         if r.tipo.value == "amortizacion":
-            por_fecha[fp]["adj_capital"] += float(r.monto_base)
-            por_fecha[fp]["capital"] += float(r.monto_base)
+            por_fecha[fp]["adj_capital"] += float(r.monto_base) * escala
+            por_fecha[fp]["capital"] += float(r.monto_base) * escala
             if r.capital_pct is not None:
                 por_fecha[fp]["capital_pct"] = float(r.capital_pct)
                 por_fecha[fp]["residual_value"] = float(r.residual_pct or 0)
         else:
-            por_fecha[fp]["adj_interest_amount"] += float(r.monto_base)
+            por_fecha[fp]["adj_interest_amount"] += float(r.monto_base) * escala
             # Para fechas solo con cupón (sin amortización), guardar residual del cupón
             if r.capital_pct is not None and "capital_pct" not in por_fecha[fp]:
                 por_fecha[fp]["capital_pct"] = float(r.capital_pct)
                 por_fecha[fp]["residual_value"] = float(r.residual_pct or 0)
+        # cer_al_fetch: usar el primero disponible del grupo (todos deberían ser iguales)
+        if por_fecha[fp]["cer_al_fetch"] is None and r.cer_al_fetch is not None:
+            por_fecha[fp]["cer_al_fetch"] = float(r.cer_al_fetch)
 
     return sorted(por_fecha.values(), key=lambda x: x["fecha_pago"])
 
@@ -282,7 +326,7 @@ def _cashflows_para_metricas(session: Session, ticker: str) -> list[dict]:
 
 def run_etl(session: Session) -> None:
     ayer = date.today() - timedelta(days=1)
-    inicio = date(2025, 1, 1)
+    inicio = date(2015, 1, 1)
 
     # 1. Token Docta
     log.info("Obteniendo token de Docta...")
@@ -292,25 +336,30 @@ def run_etl(session: Session) -> None:
         log.error(f"No se pudo obtener token de Docta: {e}")
         token = None
 
-    # 2. Cargar CER desde BCRA
+    # 2. Cargar CER desde BCRA (en chunks anuales para evitar límite de 1000 registros)
     log.info("Cargando coeficientes CER...")
     max_cer = _max_fecha_cer(session)
     desde_cer = (max_cer + timedelta(days=1)) if max_cer else inicio
     if desde_cer <= ayer:
-        try:
-            df_cer = fetch_cer(desde_cer, ayer)
-            nuevos_cer = 0
-            for _, row in df_cer.iterrows():
-                fecha_cer = date.fromisoformat(str(row["fecha"])[:10])
-                existe = session.get(CoeficienteCer, fecha_cer)
-                if not existe:
-                    session.add(CoeficienteCer(fecha=fecha_cer, valor=Decimal(str(row["valor"]))))
-                    nuevos_cer += 1
-            session.commit()
-            log.info(f"CER: {nuevos_cer} nuevas filas insertadas.")
-        except Exception as e:
-            log.error(f"Error cargando CER: {e}")
-            session.rollback()
+        total_cer = 0
+        chunk_inicio = desde_cer
+        while chunk_inicio <= ayer:
+            chunk_fin = min(date(chunk_inicio.year + 1, chunk_inicio.month, chunk_inicio.day) - timedelta(days=1), ayer)
+            try:
+                df_cer = fetch_cer(chunk_inicio, chunk_fin)
+                for _, row in df_cer.iterrows():
+                    fecha_cer = date.fromisoformat(str(row["fecha"])[:10])
+                    existe = session.get(CoeficienteCer, fecha_cer)
+                    if not existe:
+                        session.add(CoeficienteCer(fecha=fecha_cer, valor=Decimal(str(row["valor"]))))
+                        total_cer += 1
+                session.commit()
+                log.info(f"CER: chunk {chunk_inicio} → {chunk_fin} cargado ({len(df_cer)} registros).")
+            except Exception as e:
+                log.error(f"Error cargando CER {chunk_inicio}→{chunk_fin}: {e}")
+                session.rollback()
+            chunk_inicio = chunk_fin + timedelta(days=1)
+        log.info(f"CER: {total_cer} nuevas filas insertadas en total.")
     else:
         log.info("CER ya está actualizado.")
 
@@ -321,16 +370,30 @@ def run_etl(session: Session) -> None:
         ticker = bono.ticker
         log.info(f"Procesando {ticker}...")
 
-        # 3a. Cashflows: intentar cargar si no existen
-        if not _tiene_cashflows(session, ticker) and token:
+        # 3a. Cashflows: cargar si no existen o si cer_al_fetch es NULL (datos sin escala CER)
+        if _cashflows_necesitan_fetch(session, ticker) and token:
             log.info(f"  {ticker}: fetcheando cashflows de Docta...")
             try:
+                # Obtener CER del día para guardarlo junto a los cashflows
+                cer_hoy_cf = _get_cer_para_fecha(session, ayer)
+                if cer_hoy_cf is None:
+                    log.warning(f"  {ticker}: sin CER para {ayer}, usando CER más reciente.")
+                    cer_hoy_cf = session.execute(
+                        select(CoeficienteCer.valor).order_by(CoeficienteCer.fecha.desc()).limit(1)
+                    ).scalar()
+                    cer_hoy_cf = Decimal(str(cer_hoy_cf)) if cer_hoy_cf else Decimal("1")
+
+                # Borrar cashflows viejos (y métricas asociadas) antes de re-insertar
+                if _tiene_cashflows(session, ticker):
+                    _borrar_cashflows_y_metricas(session, ticker)
+
+                time.sleep(2)  # evitar rate-limit de Docta entre requests
                 df_cf = fetch_cashflows_docta(ticker, token)
-                max_fecha = _guardar_cashflows_docta(session, ticker, df_cf)
+                max_fecha = _guardar_cashflows_docta(session, ticker, df_cf, cer_hoy_cf)
                 if max_fecha:
                     bono.fecha_vencimiento = max_fecha
                 session.commit()
-                log.info(f"  {ticker}: {len(df_cf)} filas de cashflows cargadas.")
+                log.info(f"  {ticker}: {len(df_cf)} filas de cashflows cargadas (cer_al_fetch={cer_hoy_cf}).")
             except requests.HTTPError as e:
                 status = e.response.status_code if e.response is not None else "?"
                 log.warning(f"  {ticker}: Docta devolvió {status} — sin cashflows.")
@@ -398,6 +461,8 @@ def run_etl(session: Session) -> None:
             cierre = _decimal_or_none(row.get("cierre"))
             if not (tiene_cfs and cierre and cashflows_metricas):
                 continue
+            if cierre < Decimal("1"):
+                continue
 
             cer_fecha = _get_cer_para_fecha(session, fecha_precio)
             if cer_fecha is None:
@@ -414,10 +479,13 @@ def run_etl(session: Session) -> None:
                     cashflows=cashflows_metricas,
                     cer_hoy=cer_fecha,
                     fecha_hoy=fecha_precio,
+                    cotiza_por_residual=(ticker in COTIZA_POR_RESIDUAL),
                 )
-                import math
                 if any(math.isnan(v) for v in metricas.values()):
                     log.warning(f"  {ticker} {fecha_precio}: métricas con NaN, omitiendo.")
+                    continue
+                if abs(metricas["tir"]) > 1.0:
+                    log.warning(f"  {ticker} {fecha_precio}: TIR={metricas['tir']:.2%} fuera de rango (probable día ex-div), omitiendo.")
                     continue
 
                 session.add(MetricaDiaria(
@@ -448,9 +516,6 @@ def backfill_metricas(session: Session) -> None:
     Calcula métricas para todos los precios que no las tienen aún,
     siempre que el bono tenga cashflows y exista CER para esa fecha.
     """
-    import math
-    from sqlalchemy import outerjoin
-
     log.info("=== Backfill de métricas faltantes ===")
 
     # Bonos con cashflows
@@ -484,7 +549,7 @@ def backfill_metricas(session: Session) -> None:
         nuevas = 0
 
         for precio_row in precios_sin_metrica:
-            if precio_row.cierre is None:
+            if precio_row.cierre is None or precio_row.cierre < Decimal("1"):
                 continue
 
             cer_fecha = _get_cer_para_fecha(session, precio_row.fecha)
@@ -497,8 +562,12 @@ def backfill_metricas(session: Session) -> None:
                     cashflows=cashflows_metricas,
                     cer_hoy=cer_fecha,
                     fecha_hoy=precio_row.fecha,
+                    cotiza_por_residual=(ticker in COTIZA_POR_RESIDUAL),
                 )
                 if any(math.isnan(v) for v in metricas.values()):
+                    continue
+                if abs(metricas["tir"]) > 1.0:
+                    log.warning(f"  {ticker} {precio_row.fecha}: TIR={metricas['tir']:.2%} fuera de rango (probable día ex-div), omitiendo.")
                     continue
 
                 session.add(MetricaDiaria(
