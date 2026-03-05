@@ -38,37 +38,37 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 GRUPOS = {
-    "corto": "Bonos CER corto plazo (venc. < 2 años)",
-    "medio": "Bonos CER mediano plazo (2-5 años)",
-    "largo": "Bonos CER largo plazo (> 5 años)",
+    "lecer": "Letras del Tesoro ajustadas por CER (zero coupon, bullet)",
+    "cer": "Bonos CER del Tesoro y reestructurados soberanos",
 }
 
 # ticker -> (nombre, grupo, tipo_amortizacion)
 BONOS: dict[str, tuple[str, str, TipoAmortizacion]] = {
-    # Corto plazo
-    "TZXM6": ("BONCER Mar 2026", "corto", TipoAmortizacion.BULLET),
-    "TZXO6": ("BONCER Oct 2026", "corto", TipoAmortizacion.BULLET),
-    "X29Y6": ("BONCER Ene 2026", "corto", TipoAmortizacion.BULLET),
-    "X30N6": ("BONCER Nov 2026", "corto", TipoAmortizacion.BULLET),
-    "X31L6": ("BONCER Jul 2026", "corto", TipoAmortizacion.BULLET),
-    "TZXD6": ("BONCER Dic 2026", "corto", TipoAmortizacion.BULLET),
-    "TZX26": ("BONCER 2026", "corto", TipoAmortizacion.BULLET),
-    "TX26": ("BONCER TX26", "corto", TipoAmortizacion.CUOTAS),
-    # Medio plazo
-    "TZXM7": ("BONCER Mar 2027", "medio", TipoAmortizacion.BULLET),
-    "TZXA7": ("BONCER Abr 2027", "medio", TipoAmortizacion.BULLET),
-    "TZXY7": ("BONCER May 2027", "medio", TipoAmortizacion.BULLET),
-    "TZX27": ("BONCER 2027", "medio", TipoAmortizacion.BULLET),
-    "TZXD7": ("BONCER Dic 2027", "medio", TipoAmortizacion.BULLET),
-    "TZX28": ("BONCER 2028", "medio", TipoAmortizacion.BULLET),
-    "TX28": ("BONCER TX28", "medio", TipoAmortizacion.CUOTAS),
-    # Largo plazo
-    "TX31": ("BONCER TX31", "largo", TipoAmortizacion.CUOTAS),
-    "DICP": ("DISCOUNT CER", "largo", TipoAmortizacion.BULLET),
-    "DIP0": ("DISCOUNT CER 0", "largo", TipoAmortizacion.BULLET),
-    "PARP": ("PAR CER", "largo", TipoAmortizacion.BULLET),
-    "PAP0": ("PAR CER 0", "largo", TipoAmortizacion.BULLET),
-    "CUAP": ("CUASI PAR CER", "largo", TipoAmortizacion.BULLET),
+    # LECERs (Letras del Tesoro CER, zero coupon)
+    "X15Y6": ("LECER May 2026", "lecer", TipoAmortizacion.BULLET),
+    "X29Y6": ("LECER May 2026 (29)", "lecer", TipoAmortizacion.BULLET),
+    "X30N6": ("LECER Nov 2026", "lecer", TipoAmortizacion.BULLET),
+    "X31L6": ("LECER Jul 2026", "lecer", TipoAmortizacion.BULLET),
+    "TZXA7": ("LECER Abr 2027", "lecer", TipoAmortizacion.BULLET),
+    "TZXY7": ("LECER May 2027", "lecer", TipoAmortizacion.BULLET),
+    # BONCERs del Tesoro (zero coupon y con amortización)
+    "TZXM6": ("BONCER Mar 2026", "cer", TipoAmortizacion.BULLET),
+    "TZXO6": ("BONCER Oct 2026", "cer", TipoAmortizacion.BULLET),
+    "TZXD6": ("BONCER Dic 2026", "cer", TipoAmortizacion.BULLET),
+    "TZX26": ("BONCER 2026", "cer", TipoAmortizacion.BULLET),
+    "TX26": ("BONCER TX26", "cer", TipoAmortizacion.CUOTAS),
+    "TZXM7": ("BONCER Mar 2027", "cer", TipoAmortizacion.BULLET),
+    "TZX27": ("BONCER 2027", "cer", TipoAmortizacion.BULLET),
+    "TZXD7": ("BONCER Dic 2027", "cer", TipoAmortizacion.BULLET),
+    "TZX28": ("BONCER 2028", "cer", TipoAmortizacion.BULLET),
+    "TX28": ("BONCER TX28", "cer", TipoAmortizacion.CUOTAS),
+    # BONCERs largos y reestructurados
+    "TX31": ("BONCER TX31", "cer", TipoAmortizacion.CUOTAS),
+    "DICP": ("DISCOUNT CER", "cer", TipoAmortizacion.BULLET),
+    "DIP0": ("DISCOUNT CER 0", "cer", TipoAmortizacion.BULLET),
+    "PARP": ("PAR CER", "cer", TipoAmortizacion.BULLET),
+    "PAP0": ("PAR CER 0", "cer", TipoAmortizacion.BULLET),
+    "CUAP": ("CUASI PAR CER", "cer", TipoAmortizacion.BULLET),
 }
 
 # Fecha de vencimiento placeholder (se actualiza con los cashflows de Docta)

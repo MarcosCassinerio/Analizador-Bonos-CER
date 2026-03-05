@@ -7,52 +7,54 @@ Este proyecto analiza el mercado de bonos argentinos ajustados por CER (inflaci�
 El proyecto fue diseñado deliberadamente sobre bonos CER y no sobre acciones argentinas o bonos en USD, por las siguientes razones metodológicas:
 - Los bonos CER tienen una lógica más modelable que acciones locales, que están sujetas a shocks exógenos difíciles de capturar (cepos, elecciones, cambios de régimen)
 - Los bonos en USD (familia GD) tienen solo 6 puntos para ajustar la curva, lo que hace el ajuste poco robusto
-- El universo CER tiene heterogeneidad real en estructura, duration y liquidez, lo que justifica análisis de clustering y agrupamiento
+- El universo CER tiene heterogeneidad real en estructura, duration y liquidez, lo que justifica dos grupos bien diferenciados (`lecer` / `cer`) y análisis de valor relativo dentro de cada uno
 
 ---
 
 ## Universo de bonos
 
-Los grupos son dinámicos y emergen del clustering. La clasificación inicial es orientativa.
+Los bonos se dividen en dos grupos fijos (`lecer` / `cer`) que reflejan diferencias estructurales reales y justifican curvas Nelson-Siegel separadas.
 
 ### Bonos incluidos
 
-#### Grupo corto (vencimiento hasta ~12 meses desde inicio del proyecto)
+#### Grupo `lecer` — Letras del Tesoro CER (zero coupon, bullet)
+Instrumento de corto plazo: un único pago al vencimiento (capital ajustado por CER, sin cupones). Curva cubre durations ~0.05–1.2 años.
+
+| Ticker | Instrumento | Vencimiento aprox. |
+|--------|-------------|-------------------|
+| X15Y6  | LECER mayo 2026 | may-26 |
+| X29Y6  | LECER mayo 2026 (serie 29) | may-26 |
+| X31L6  | LECER julio 2026 | jul-26 |
+| X30N6  | LECER nov 2026 | nov-26 |
+| TZXA7  | LECER abr 2027 | abr-27 |
+| TZXY7  | LECER may 2027 | may-27 |
+
+#### Grupo `cer` — BONCERs del Tesoro y soberanos reestructurados
+Bonos con cupones periódicos y/o amortizaciones. Curva cubre durations ~0.07–9.5 años.
+
 | Ticker | Instrumento | Estructura |
 |--------|-------------|------------|
-| TZXM6 | LECER marzo 2026 | Bullet, cupón cero |
-| TZXO6 | LECER abril 2026 | Bullet, cupón cero |
-| X29Y6 | LECER mayo 2026 | Bullet, cupón cero |
-| X30N6 | LECER junio 2026 | Bullet, cupón cero |
-| X31L6 | LECER julio 2026 | Bullet, cupón cero |
-| TZXD6 | LECER diciembre 2026 | Bullet, cupón cero |
-| TZX26 | BONCER 2026 | Bullet, cupón semestral |
-| TX26 | BONCER abril 2026 | Amortización en cuotas, cupón semestral |
+| TZXM6  | BONCER mar 2026 | Bullet, cupón semestral |
+| TZXO6  | BONCER oct 2026 | Bullet, cupón semestral |
+| TZXD6  | BONCER dic 2026 | Bullet, cupón semestral |
+| TZX26  | BONCER 2026 | Bullet, cupón semestral |
+| TX26   | BONCER TX26 | Amortización en cuotas, cupón semestral |
+| TZXM7  | BONCER mar 2027 | Bullet, cupón semestral |
+| TZX27  | BONCER 2027 | Bullet, cupón semestral |
+| TZXD7  | BONCER dic 2027 | Bullet, cupón semestral |
+| TZX28  | BONCER 2028 | Bullet, cupón semestral |
+| TX28   | BONCER TX28 | Amortización en cuotas, cupón semestral |
+| TX31   | BONCER TX31 | Amortización en cuotas, cupón semestral |
+| DICP   | DISCOUNT CER Ley Argentina | Amortización compleja, canje 2005 |
+| DIP0   | DISCOUNT CER Ley Externa | Igual a DICP, distinta legislación |
+| PARP   | PAR CER Ley Argentina | Amortización compleja, canje 2005 |
+| PAP0   | PAR CER Ley Externa | Igual a PARP, distinta legislación |
+| CUAP   | CUASI PAR CER | Amortización compleja, canje 2005 |
 
-#### Grupo medio (vencimiento entre 1 y 3 años)
-| Ticker | Instrumento | Estructura |
-|--------|-------------|------------|
-| TZXM7 | LECER marzo 2027 | Bullet, cupón cero |
-| TZXA7 | LECER abril 2027 | Bullet, cupón cero |
-| TZXY7 | LECER mayo 2027 | Bullet, cupón cero |
-| TZX27 | BONCER 2027 | Bullet, cupón semestral |
-| TZXD7 | LECER diciembre 2027 | Bullet, cupón cero |
-| TZX28 | BONCER 2028 | Bullet, cupón semestral |
-| TX28 | BONCER agosto 2028 | Amortización en cuotas, cupón semestral |
-
-#### Grupo largo (vencimiento mayor a 3 años)
-| Ticker | Instrumento | Estructura |
-|--------|-------------|------------|
-| TX31 | BONCER agosto 2031 | Amortización en cuotas, cupón semestral |
-| DICP | DISCOUNT Ley Argentina | Amortización compleja, canje 2005 |
-| DIP0 | DISCOUNT Ley Externa | Igual a DICP, distinta legislación |
-| PARP | PAR Ley Argentina | Amortización compleja, canje 2005 |
-| PAP0 | PAR Ley Externa | Igual a PARP, distinta legislación |
-| CUAP | CUASI PAR | Amortización compleja, canje 2005 |
-
-**Notas sobre el universo incluido:**
-- DICP/DIP0 y PARP/PAP0 son el mismo bono económicamente, con distinta legislación (Ley Argentina vs Ley Nueva York). Se incluyen ambas series para capturar el spread de legislación.
-- Los tickers de tramo corto (LECER) rotan a medida que vencen y el Tesoro emite nuevas series. La tabla refleja el universo vigente al inicio del proyecto; se actualizará a medida que entren nuevos instrumentos.
+**Notas:**
+- La separación `lecer`/`cer` es estructural: los LECER son zero coupon y su curva requiere λ calibrado en un rango corto; los CER tienen flujos intermedios y cubren todo el espectro de durations.
+- DICP/DIP0 y PARP/PAP0 son económicamente el mismo bono con distinta legislación (Ley Argentina vs Nueva York). Se incluyen ambas series para capturar el spread de legislación.
+- Los tickers LECER rotan a medida que vencen y el Tesoro emite nuevas series. La tabla refleja el universo vigente; se actualiza a medida que entran nuevos instrumentos.
 
 ---
 
@@ -135,9 +137,9 @@ z = (residual_hoy - media_historica) / desvio_historico
 - z < -1.5: bono inusualmente caro
 
 ### Estructura de tres niveles de análisis
-1. **Intragrupo**: valor relativo entre bonos del mismo segmento (más limpio, bonos similares entre sí)
-2. **Intergrupo**: comparación de curvas entre segmentos, spread entre grupos como prima por duration
-3. **Curva completa**: ajuste global ponderado por liquidez, análisis de anomalías multidimensionales
+1. **Intragrupo**: residuales NS por bono dentro de `lecer` o `cer` (z-score: ¿está rich/cheap respecto a su curva?)
+2. **Intergrupo**: spread entre curvas `lecer` y `cer` en durations comparables (prima por tipo de instrumento)
+3. **Global**: anomalía multidimensional detectada por el autoencoder sobre el vector de features completo
 
 ---
 
@@ -170,9 +172,9 @@ Las funciones de acceso a las APIs externas están encapsuladas en `src/apis.py`
 - Logging de parámetros y RMSE a MLflow
 
 ### src/clustering.py
-- Features: duration, tasa de cupón real, volumen promedio, plazo, tipo de amortización
+- Features: duration media, volumen promedio, dispersión de TIR, tipo de amortización
 - K-Means y clustering jerárquico
-- Comparación con agrupamiento intuitivo
+- Validación de la separación `lecer`/`cer` y detección de sub-estructura interna
 
 ### src/signals.py
 - Cálculo de residuales y z-scores
@@ -188,38 +190,42 @@ Las funciones de acceso a las APIs externas están encapsuladas en `src/apis.py`
 - Visualización de la curva real en distintas fechas históricas
 - Formas inusuales de la curva argentina (invertida en períodos de estrés)
 
-### Notebook 02: Clustering
-- Construcción de matriz de features por bono
-- K-Means y clustering jerárquico
-- Comparación de grupos emergentes con clasificación intuitiva (corto/medio/largo)
-- Justificación metodológica del agrupamiento final
+### Notebook 02: Curvas de tasas reales (LECER y CER)
+- Visualización de la curva TIR vs Duration a lo largo del tiempo
+- Curva LECER: una línea por mes desde el primer dato disponible (~2025-12)
+- Curva CER: una línea por trimestre desde el primer dato disponible (~2021-06)
+- Identificación de regímenes: pre/post 2025-Q2 (desinflación acelerada vs régimen actual)
+- Conclusión: el rango útil para entrenamiento del modelo arranca en 2025-Q2
 
-### Notebook 03: Análisis intragrupo
-- Ajuste de curva Nelson-Siegel por grupo (spline cúbico para grupo largo si tiene pocos puntos)
-- Residuales y z-scores históricos por bono
-- Señales de valor relativo dentro de cada grupo
-- Ejemplo: TX28 vs TX26 y TX29 en el grupo medio
+### Notebook 03: Ajuste Nelson-Siegel ✅
+- Ajuste diario del modelo Nelson-Siegel separado por grupo (`lecer` / `cer`)
+- Evolución temporal de parámetros β₀, β₁, β₂, λ y RMSE
+- Curvas ajustadas vs datos reales (muestra de fechas)
+- Residuales por bono: detección de bonos sistemáticamente rich/cheap
 
-### Notebook 04: Análisis intergrupo
-- Evolución temporal de parámetros Nelson-Siegel por grupo (β0, β1, β2)
-- Spread entre grupos: prima por duration entre tramo medio y largo
-- ¿La curva real se empinó o aplanó entre segmentos?
-- Interpretación macro de los movimientos de spread
+### Notebook 04: Clustering
+- Construcción de matriz de features por bono: duration media, volumen promedio, tipo amortización, dispersión de TIR
+- K-Means y clustering jerárquico sobre el universo completo
+- Validación de que la separación `lecer`/`cer` es la partición natural del espacio
+- Detección de sub-estructura interna (ej. reestructurados vs BONCERs del Tesoro dentro de `cer`)
+- No se derivan grupos corto/mediano/largo: el objetivo es confirmar o enriquecer la clasificación existente
 
-### Notebook 05: Curva completa
-- Ajuste Nelson-Siegel global ponderado por liquidez
-- Comparación curva global vs curvas por grupo
-- PCA sobre serie histórica de parámetros: modos de movimiento de la curva real
-  - PC1: movimientos paralelos
+### Notebook 05: PCA sobre parámetros Nelson-Siegel
+- PCA sobre la serie histórica de parámetros (β₀, β₁, β₂, λ) de cada grupo
+- Modos de movimiento de la curva real:
+  - PC1: movimientos paralelos (nivel general de tasas)
   - PC2: rotaciones (cambios de pendiente)
   - PC3: cambios de curvatura
-- Interpretación macroeconómica de cada componente principal
+- Interpretación macroeconómica de cada componente
+- Construcción del vector de features diario para el autoencoder: parámetros NS + residuales por bono + volúmenes normalizados
 
 ### Notebook 06: Autoencoder PyTorch (detección de anomalías)
 Ver sección dedicada abajo.
 
 ### Notebook 07: Síntesis y señales
-- Consolidación de señales de los tres niveles
+- z-scores de residuales NS por bono (señales intragrupo)
+- Spread entre grupos `lecer` y `cer` en durations comparables (señal intergrupo)
+- Anomalía global según el autoencoder (z_anomalia)
 - Dashboard en notebook con estado actual de todas las señales
 - Señal más robusta: cuando intragrupo, intergrupo y global apuntan en la misma dirección
 - Logging histórico de señales en MLflow
@@ -232,11 +238,10 @@ Ver sección dedicada abajo.
 Un z-score univariado detecta si un bono individual está raro. El autoencoder detecta si la **configuración global de la curva** es inusual, capturando anomalías multidimensionales que los z-scores no ven. Tiene sentido financiero real: un shock de inflación, una intervención del BCRA o una dislocation de precios generan patrones en múltiples bonos simultáneamente.
 
 ### Input del autoencoder
-Cada día queda representado por un vector de features:
-- Parámetros Nelson-Siegel globales: β0, β1, β2, λ
-- Residuales de cada bono respecto a la curva global
-- Spreads entre grupos en plazos de referencia
-- Durations promedio por grupo
+Cada día queda representado por un vector de features (construido en NB05):
+- Parámetros Nelson-Siegel de cada grupo: β₀, β₁, β₂, λ (×2 grupos = 8 valores)
+- Residuales de cada bono respecto a su curva NS del grupo
+- Spread entre grupos `lecer` y `cer` en durations comparables
 - Volumen operado normalizado por grupo
 
 ### Arquitectura
@@ -281,9 +286,9 @@ analisador-bonos-cer/
 │   └── env.py
 ├── notebooks/
 │   ├── 01_eda.ipynb
-│   ├── 02_clustering.ipynb
-│   ├── 03_intragrupo.ipynb
-│   ├── 04_intergrupo.ipynb
+│   ├── 02_curvas_tasas_reales.ipynb
+│   ├── 03_clustering.ipynb
+│   ├── 04_intragrupo.ipynb
 │   ├── 05_curva_completa.ipynb
 │   ├── 06_autoencoder_anomalias.ipynb
 │   └── 07_señales.ipynb
@@ -363,7 +368,7 @@ TIR, duration modificada, paridad, valor técnico, intereses corridos y valor re
 ## Decisiones metodológicas tomadas
 
 - Se usa duration como eje x de la curva (no plazo nominal) para capturar diferencias de amortización
-- Los grupos emergen del clustering, no se imponen a mano
+- Los grupos (`lecer`/`cer`) son estructurales: zero coupon vs con cupones. El clustering valida esta separación y detecta sub-estructura interna.
 - La curva global se ajusta ponderando por liquidez para que bonos ilíquidos no distorsionen el ajuste
 - El autoencoder se entrena solo sobre períodos normales para que los eventos extremos sean detectables
 - No se usa LSTM para predicción de precios: no está justificado y el mercado argentino tiene demasiados shocks exógenos
@@ -376,10 +381,10 @@ TIR, duration modificada, paridad, valor técnico, intereses corridos y valor re
 - [x] Diseñar schema de base de datos y generar migración inicial con Alembic
 - [x] Crear schemas Pydantic y modelos SQLAlchemy
 - [x] Correr migración y construir ETL de carga diaria (`src/etl.py`)
-- [ ] Notebook 01: EDA
-- [ ] Notebook 02: Clustering
-- [ ] Notebook 03: Intragrupo
-- [ ] Notebook 04: Intergrupo
-- [ ] Notebook 05: Curva completa + PCA
+- [x] Notebook 01: EDA
+- [x] Notebook 02: Curvas de tasas reales
+- [x] Notebook 03: Nelson-Siegel (lecer / cer)
+- [ ] Notebook 04: Clustering (validación lecer/cer + sub-estructura)
+- [ ] Notebook 05: PCA sobre parámetros NS + feature engineering
 - [ ] Notebook 06: Autoencoder PyTorch
 - [ ] Notebook 07: Síntesis de señales
