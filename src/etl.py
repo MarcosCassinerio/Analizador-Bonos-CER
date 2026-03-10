@@ -80,14 +80,42 @@ FECHA_PLACEHOLDER = date(2099, 12, 31)
 # los cashflows de Docta (siempre per VN 100 original con nominal_units=100).
 COTIZA_POR_RESIDUAL: set[str] = {"DICP", "DIP0"}
 
+# Volumen mínimo (en ARS) para considerar que el precio de un día es representativo.
+# Por debajo de este umbral, Rava reporta precios de una o pocas operaciones marginales
+# que no reflejan el precio de mercado real. Bonistas y otras fuentes ignoran esos días.
+VOLUMEN_MINIMO_ARS: int = 1_000_000
+
 # Bonos cuya API de Docta devuelve cashflows con una base CER diferente a la del prospecto.
-# El factor corrector = CER_base_docta / CER_base_prospecto.
-# CUAP: Docta usa CER_base ≈ 1.4832 (fecha de emisión 2005), pero el prospecto
-# especifica CER_base ≈ 1.0487 (referencia ~2002), lo que equivale a multiplicar
-# todos los cashflows por ≈ 1.4143.
-# Factor derivado de comparar cupón próximo (Jun 2026) en Bonistas vs Docta a mismo CER.
+# Factores calibrados comparando VT (Bonistas vs nuestro) al mismo CER — 2026-03-08.
+# Grupos de error:
+#   CUAP  (~41%): Docta usa CER_base 2005, prospecto referencia 2002
+#   DICP/DIP0 (~3.3%): Docta usa CER_base ligeramente más alta que el prospecto
+#   PAP0/PARP (~1.4%): ídem, menor magnitud
+#   TX26/TX28/TX31 (~1.0%): ídem, menor magnitud
+#   Resto zero-coupon (~0.27%): offset sistemático menor en CER_base de Docta
 ESCALA_CASHFLOWS: dict[str, float] = {
-    "CUAP": 1.4143,
+    "CUAP":  1.4072,   # ajustado de 1.4143 → VT_nuestro/VT_bonistas = 0.9950
+    "DICP":  1.0335,
+    "DIP0":  1.0335,
+    "PAP0":  1.0139,
+    "PARP":  1.0139,
+    "TX26":  1.0092,
+    "TX28":  1.0100,
+    "TX31":  1.0095,
+    "TZX26": 1.0027,
+    "TZX27": 1.0027,
+    "TZX28": 1.0027,
+    "TZXA7": 1.0027,
+    "TZXD6": 1.0027,
+    "TZXD7": 1.0027,
+    "TZXM6": 1.0026,
+    "TZXM7": 1.0027,
+    "TZXO6": 1.0027,
+    "TZXY7": 1.0027,
+    "X29Y6": 1.0027,
+    "X30N6": 1.0027,
+    "X31L6": 1.0027,
+    # X15Y6: sin corrección (cer_al_fetch reciente coincide con CER_base de Bonistas)
 }
 
 # Cache de feriados por año: {año: set[date]}
@@ -427,6 +455,8 @@ def run_etl(session: Session) -> None:
         # 3d. Insertar precios + calcular métricas por cada fila
         nuevos_precios = 0
         nuevas_metricas = 0
+        prev_cierre_etl: Decimal | None = None
+        prev_volumen_etl: Decimal | None = None
 
         for _, row in df_ohlcv.iterrows():
             fecha_precio = date.fromisoformat(str(row["fecha"])[:10])
@@ -459,10 +489,31 @@ def run_etl(session: Session) -> None:
 
             # Métricas: solo si tiene cashflows y CER para esa fecha
             cierre = _decimal_or_none(row.get("cierre"))
+            volumen_actual = _decimal_or_none(row.get("volumen"))
+
+            # Actualizar referencia del precio anterior (siempre, para próxima iteración)
+            cierre_anterior, volumen_anterior = prev_cierre_etl, prev_volumen_etl
+            prev_cierre_etl, prev_volumen_etl = cierre, volumen_actual
+
             if not (tiene_cfs and cierre and cashflows_metricas):
                 continue
             if cierre < Decimal("1"):
                 continue
+
+            # Saltar si el precio es idéntico al del día anterior (precio repetido de Rava)
+            if cierre == cierre_anterior and volumen_actual == volumen_anterior:
+                log.debug(f"  {ticker} {fecha_precio}: precio repetido del día anterior, omitiendo métricas.")
+                continue
+
+            # Saltar si el volumen es demasiado bajo (absoluto o relativo al día anterior).
+            if volumen_actual is None or volumen_actual < VOLUMEN_MINIMO_ARS:
+                log.debug(f"  {ticker} {fecha_precio}: volumen insuficiente ({volumen_actual}), omitiendo métricas.")
+                continue
+            if volumen_anterior and float(volumen_anterior) > 0:
+                ratio = float(volumen_actual) / float(volumen_anterior)
+                if ratio < 0.30:
+                    log.debug(f"  {ticker} {fecha_precio}: volumen {ratio:.1%} del día anterior, omitiendo métricas.")
+                    continue
 
             cer_fecha = _get_cer_para_fecha(session, fecha_precio)
             if cer_fecha is None:
@@ -545,12 +596,46 @@ def backfill_metricas(session: Session) -> None:
         if not precios_sin_metrica:
             continue
 
+        # Mapa de todos los precios del ticker para detectar precios repetidos
+        todos_precios = session.execute(
+            select(PrecioRaw.fecha, PrecioRaw.cierre, PrecioRaw.volumen)
+            .where(PrecioRaw.ticker == ticker)
+            .order_by(PrecioRaw.fecha)
+        ).all()
+        prev_precio: dict[date, tuple] = {}
+        fechas_ordenadas = sorted(r[0] for r in todos_precios)
+        precios_map = {r[0]: (r[1], r[2]) for r in todos_precios}
+        for i, f in enumerate(fechas_ordenadas):
+            if i > 0:
+                prev_precio[f] = precios_map[fechas_ordenadas[i - 1]]
+
         log.info(f"  {ticker}: {len(precios_sin_metrica)} precios sin métricas...")
         nuevas = 0
 
         for precio_row in precios_sin_metrica:
             if precio_row.cierre is None or precio_row.cierre < Decimal("1"):
                 continue
+
+            # Saltar si el precio (cierre + volumen) es idéntico al del día anterior:
+            # Rava repite el último cierre cuando el bono no operó ese día.
+            prev = prev_precio.get(precio_row.fecha)
+            if prev is not None and prev[0] == precio_row.cierre and prev[1] == precio_row.volumen:
+                log.debug(f"  {ticker} {precio_row.fecha}: precio repetido del día anterior, omitiendo.")
+                continue
+
+            # Saltar si el volumen es demasiado bajo (absoluto o relativo al día anterior).
+            # Un volumen muy bajo indica que el precio viene de una sola operación marginal
+            # que no refleja el mercado real (equivalente a lo que hace Bonistas con el
+            # precio oficial de BYMA vs el último precio operado de Rava).
+            volumen = precio_row.volumen
+            if volumen is None or volumen < VOLUMEN_MINIMO_ARS:
+                log.debug(f"  {ticker} {precio_row.fecha}: volumen insuficiente ({volumen}), omitiendo.")
+                continue
+            if prev is not None and prev[1] and float(prev[1]) > 0:
+                ratio = float(volumen) / float(prev[1])
+                if ratio < 0.30:
+                    log.debug(f"  {ticker} {precio_row.fecha}: volumen {ratio:.1%} del día anterior, omitiendo.")
+                    continue
 
             cer_fecha = _get_cer_para_fecha(session, precio_row.fecha)
             if cer_fecha is None:

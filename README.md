@@ -136,10 +136,9 @@ z = (residual_hoy - media_historica) / desvio_historico
 - z > 1.5 o 2: bono inusualmente barato relativo a la curva
 - z < -1.5: bono inusualmente caro
 
-### Estructura de tres niveles de análisis
+### Estructura de dos niveles de análisis
 1. **Intragrupo**: residuales NS por bono dentro de `lecer` o `cer` (z-score: ¿está rich/cheap respecto a su curva?)
-2. **Intergrupo**: spread entre curvas `lecer` y `cer` en durations comparables (prima por tipo de instrumento)
-3. **Global**: anomalía multidimensional detectada por el autoencoder sobre el vector de features completo
+2. **Global**: anomalía multidimensional detectada por Mahalanobis (NB05) y autoencoder (NB06) sobre el vector de parámetros NS
 
 ---
 
@@ -178,8 +177,8 @@ Las funciones de acceso a las APIs externas están encapsuladas en `src/apis.py`
 
 ### src/signals.py
 - Cálculo de residuales y z-scores
-- Señales intragrupo, intergrupo y globales
-- Consolidación de señales de los tres niveles
+- Señales intragrupo y globales
+- Consolidación de señales de los dos niveles
 
 ---
 
@@ -203,61 +202,94 @@ Las funciones de acceso a las APIs externas están encapsuladas en `src/apis.py`
 - Curvas ajustadas vs datos reales (muestra de fechas)
 - Residuales por bono: detección de bonos sistemáticamente rich/cheap
 
-### Notebook 04: Clustering
-- Construcción de matriz de features por bono: duration media, volumen promedio, tipo amortización, dispersión de TIR
-- K-Means y clustering jerárquico sobre el universo completo
-- Validación de que la separación `lecer`/`cer` es la partición natural del espacio
-- Detección de sub-estructura interna (ej. reestructurados vs BONCERs del Tesoro dentro de `cer`)
-- No se derivan grupos corto/mediano/largo: el objetivo es confirmar o enriquecer la clasificación existente
+### Notebook 04: Rich / Cheap — Valor relativo intragrupo
+- Evolución histórica de los residuales NS por bono (heatmap fecha × ticker)
+- Z-score de cada residual respecto a su propia historia (ventana rolling)
+- Identificación de bonos actualmente cheap (TIR > curva) o rich (TIR < curva)
+- Detección de episodios de dislocación pasados
 
-### Notebook 05: PCA sobre parámetros Nelson-Siegel
-- PCA sobre la serie histórica de parámetros (β₀, β₁, β₂, λ) de cada grupo
-- Modos de movimiento de la curva real:
-  - PC1: movimientos paralelos (nivel general de tasas)
-  - PC2: rotaciones (cambios de pendiente)
-  - PC3: cambios de curvatura
-- Interpretación macroeconómica de cada componente
-- Construcción del vector de features diario para el autoencoder: parámetros NS + residuales por bono + volúmenes normalizados
+### Notebook 05: Detección de anomalías estadística (Mahalanobis)
+- Rolling z-score de cada parámetro NS por separado (β₀, β₁, β₂, λ), por grupo
+- Distancia de Mahalanobis sobre el vector [β₀, β₁, β₂, λ] por grupo: detecta días donde la forma de la curva es inusual en conjunto
+- Identificación de días anómalos con umbral formal (percentil chi²)
+- Snapshot del estado actual: percentil histórico de la distancia y z-scores del día
+- Baseline que funciona desde el primer día; se complementa con el autoencoder (NB06)
 
 ### Notebook 06: Autoencoder PyTorch (detección de anomalías)
-Ver sección dedicada abajo.
+- Tres configuraciones por grupo (`lecer`/`cer`): C1 (régimen actual), C2 (historia extendida), C3 (C2 con decaimiento temporal)
+- Comparación de errores de reconstrucción entre configuraciones
+- Backtesting: entrenar en T-7 a T-1, evaluar en T → ¿las anomalías detectadas en T-1 se materializaron en T?
+- Logging de experimentos en MLflow (arquitectura, loss por epoch, errores de reconstrucción, z-scores)
 
 ### Notebook 07: Síntesis y señales
-- z-scores de residuales NS por bono (señales intragrupo)
-- Spread entre grupos `lecer` y `cer` en durations comparables (señal intergrupo)
-- Anomalía global según el autoencoder (z_anomalia)
-- Dashboard en notebook con estado actual de todas las señales
-- Señal más robusta: cuando intragrupo, intergrupo y global apuntan en la misma dirección
-- Logging histórico de señales en MLflow
+- z-scores de residuales NS por bono (señales intragrupo, de NB04)
+- Anomalía global: Mahalanobis (NB05) y/o autoencoder (NB06)
+- Dashboard del estado actual de todas las señales
+- Señal más robusta: cuando intragrupo y global coinciden en dirección
 
 ---
 
-## Módulo de detección de anomalías con PyTorch
+## Módulo de detección de anomalías con PyTorch (NB06)
 
 ### Motivación
-Un z-score univariado detecta si un bono individual está raro. El autoencoder detecta si la **configuración global de la curva** es inusual, capturando anomalías multidimensionales que los z-scores no ven. Tiene sentido financiero real: un shock de inflación, una intervención del BCRA o una dislocation de precios generan patrones en múltiples bonos simultáneamente.
+Un z-score univariado detecta si un bono individual está raro. El autoencoder detecta si la **configuración global de la curva** es inusual, capturando anomalías multidimensionales que los z-scores no ven. Tiene sentido financiero real: un shock de inflación, una intervención del BCRA o una dislocación de precios generan patrones en múltiples bonos simultáneamente.
 
-### Input del autoencoder
-Cada día queda representado por un vector de features (construido en NB05):
-- Parámetros Nelson-Siegel de cada grupo: β₀, β₁, β₂, λ (×2 grupos = 8 valores)
-- Residuales de cada bono respecto a su curva NS del grupo
-- Spread entre grupos `lecer` y `cer` en durations comparables
-- Volumen operado normalizado por grupo
+### Separación por grupo
+Se entrenan modelos independientes para `lecer` y `cer`, dado que sus curvas tienen escalas de duration, volatilidad y número de bonos muy distintas.
+
+### Input del autoencoder (por grupo)
+Cada día queda representado por un vector de features:
+- Parámetros Nelson-Siegel del grupo: β₀, β₁, β₂, λ
+- Residuales de cada bono del grupo respecto a la curva NS del día
+
+### Tres configuraciones de entrenamiento
+Se entrenan y comparan tres versiones de cada modelo:
+
+**C1 — Régimen actual (ventana corta, pesos uniformes)**
+- `lecer`: desde 2026-02-02 (primer día con ≥5 bonos vigentes, ~20 días)
+- `cer`: desde 2025-12-08 (régimen inflacionario actual, ~55 días)
+- Todos los días con igual peso en la loss
+- Referencia del régimen actual puro
+
+**C2 — Historia extendida (ventana larga, pesos uniformes)**
+- `lecer`: todo el historial disponible (~60 días desde dic-2025)
+- `cer`: últimos 6 meses mínimo (~125 días desde sep-2025)
+- Todos los días con igual peso en la loss
+- Más datos, incluye transición entre regímenes
+
+**C3 — Historia extendida con decaimiento temporal**
+- Mismo período que C2
+- Loss ponderada: `peso(t) = exp(-λ · días_antes_de_hoy)`, half-life configurable (~30 días)
+- Los datos más recientes dominan el entrenamiento sin descartar historia
+
+La comparación entre C1, C2 y C3 permite evaluar si el modelo aprende estructura real o si simplemente memoriza el régimen más reciente.
+
+### Backtesting (validación out-of-sample)
+Para validar que los modelos tienen valor predictivo real, se corre un backtest independiente por cada configuración desplazando todas las fechas un mes hacia atrás:
+
+**Backtest C1** (régimen actual desplazado)
+- Entrenamiento: mismo ancho de ventana que C1, pero terminando hace 1 mes
+- Evaluación: el mes más reciente (no visto en entrenamiento)
+
+**Backtest C2** (historia extendida desplazada)
+- Entrenamiento: misma ventana que C2 pero con fecha fin = hace 1 mes
+- Evaluación: el mes más reciente
+
+**Backtest C3** (decaimiento temporal desplazado)
+- Igual que C2 backtest pero con pesos de decaimiento exponencial aplicados al período desplazado
+
+En los tres casos se verifica: ¿las anomalías señaladas en la ventana de evaluación coinciden con movimientos reales de precios, spreads o residuales NS en ese período?
+La comparación entre backtests de C1, C2 y C3 determina qué configuración tiene mayor poder predictivo.
 
 ### Arquitectura
-Autoencoder feedforward simple en PyTorch:
+Autoencoder feedforward en PyTorch, dimensiones adaptadas al grupo:
 
 ```
-Encoder: input_dim → 32 → 16 → 8 (espacio latente)
-Decoder: 8 → 16 → 32 → input_dim
+Encoder: input_dim → 16 → 8 → latente_dim
+Decoder: latente_dim → 8 → 16 → input_dim
 Activación: ReLU en capas ocultas, lineal en output
 Loss: MSE entre input y reconstrucción
 ```
-
-### Entrenamiento
-- Se entrena sobre períodos de mercado "normal" (excluir ventanas con eventos extremos conocidos)
-- El autoencoder aprende a comprimir y reconstruir estados normales de la curva
-- Días donde el error de reconstrucción es alto = configuración inusual de la curva
 
 ### Señal de anomalía
 ```
@@ -265,13 +297,13 @@ error_reconstruccion = MSE(input, output)
 z_anomalia = (error_hoy - media_historica_error) / desvio_historico_error
 ```
 
-Si z_anomalia > 2: anomalía detectada. Se logea en MLflow junto con la fecha y el error.
+Si z_anomalia > 2: anomalía detectada. Se logea en MLflow junto con la fecha, el grupo y el error.
 
 ### Logging con MLflow
-- Parámetros del modelo: arquitectura, learning rate, epochs
-- Métricas de entrenamiento: loss por epoch
+- Parámetros del modelo: grupo, conjunto de entrenamiento, arquitectura, learning rate, epochs
+- Métricas de entrenamiento: loss por epoch (train y validación)
 - Serie histórica de errores de reconstrucción
-- Fechas de anomalías detectadas con su z-score
+- Fechas de anomalías detectadas con z-score
 
 ---
 
@@ -287,10 +319,10 @@ analisador-bonos-cer/
 ├── notebooks/
 │   ├── 01_eda.ipynb
 │   ├── 02_curvas_tasas_reales.ipynb
-│   ├── 03_clustering.ipynb
-│   ├── 04_intragrupo.ipynb
-│   ├── 05_curva_completa.ipynb
-│   ├── 06_autoencoder_anomalias.ipynb
+│   ├── 03_nelson_siegel.ipynb
+│   ├── 04_rich_cheap.ipynb
+│   ├── 05_anomalias_mahalanobis.ipynb
+│   ├── 06_autoencoder.ipynb
 │   └── 07_señales.ipynb
 ├── scripts/
 │   ├── explorar_apis.py        # exploración de APIs: Rava, Docta, BCRA
@@ -384,7 +416,7 @@ TIR, duration modificada, paridad, valor técnico, intereses corridos y valor re
 - [x] Notebook 01: EDA
 - [x] Notebook 02: Curvas de tasas reales
 - [x] Notebook 03: Nelson-Siegel (lecer / cer)
-- [ ] Notebook 04: Clustering (validación lecer/cer + sub-estructura)
-- [ ] Notebook 05: PCA sobre parámetros NS + feature engineering
-- [ ] Notebook 06: Autoencoder PyTorch
-- [ ] Notebook 07: Síntesis de señales
+- [ ] Notebook 04: Rich/Cheap — valor relativo intragrupo
+- [ ] Notebook 05: Detección de anomalías estadística (Mahalanobis, baseline sin red)
+- [ ] Notebook 06: Autoencoder PyTorch (dos conjuntos de entrenamiento por grupo)
+- [ ] Notebook 07: Síntesis y señales integradas
